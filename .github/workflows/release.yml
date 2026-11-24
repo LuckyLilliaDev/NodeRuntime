@@ -1,0 +1,73 @@
+# 推 "v<packageVersion>" tag (和 runtime.json 一致) 时打包并发布到 npm; 手动运行 (workflow_dispatch) 只打包,
+# 产物在 Actions 页面的 artifact 里, 不发布.
+#
+# 用 npm Trusted Publishing (OIDC) 发布, 不用 npm token: 每个包在 npm 上绑定本仓库的这个 workflow 文件
+# (release.yml). 包第一次发布前要先占位并绑定, 见 scripts/bootstrap-npm.mjs. 自动带 provenance.
+# 发布前逐个检查 npm 上是否已有同名同版本, 有就跳过, 所以中途失败后重跑同一个 tag 是安全的
+# (删远端 tag 再推一次即可: git push origin :refs/tags/vX && git push origin vX).
+# 改这个文件名的话, npm 上每个包的 trusted publisher 都要跟着改.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm Trusted Publishing (OIDC) + provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check tag matches runtime.json
+        if: github.event_name == 'push'
+        run: |
+          expected="v$(node -p "require('./runtime.json').packageVersion")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 和 runtime.json 的 packageVersion ($expected) 不一致"
+            exit 1
+          fi
+
+      - name: Fetch Node.js release keys
+        run: git clone --depth 1 https://github.com/nodejs/release-keys.git "$RUNNER_TEMP/release-keys"
+
+      - name: Build packages
+        env:
+          NODE_RELEASE_KEYRING: ${{ runner.temp }}/release-keys/gpg/pubring.kbx
+        run: node scripts/build.mjs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-runtime-packages
+          path: |
+            dist/*.tgz
+            dist/packages.json
+
+      - name: Update npm
+        if: github.event_name == 'push'
+        run: npm install -g npm@latest # Trusted Publishing 需要 npm >= 11.5.1
+
+      - name: Publish to npm
+        if: github.event_name == 'push'
+        run: |
+          jq -r '.[] | "\(.name) \(.version) \(.file)"' dist/packages.json | while read -r name version file; do
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "跳过 $name@$version: npm 上已存在"
+              continue
+            fi
+            # --tag latest: 重新打包的版本 (如 26.13.1-1) 是 prerelease 格式, npm 默认不让它当 latest
+            npm publish "$file" --provenance --access public --tag latest
+          done
