@@ -69,5 +69,6 @@ jobs:
               continue
             fi
             # --tag latest: 重新打包的版本 (如 26.13.1-1) 是 prerelease 格式, npm 默认不让它当 latest
-            npm publish "$file" --provenance --access public --tag latest
+            # "./" 不能省: 不带的话 npm 会把 dist/xxx.tgz 当成 GitHub 简写 (user/repo) 去拉
+            npm publish "./$file" --provenance --access public --tag latest
           done
